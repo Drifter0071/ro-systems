@@ -36,9 +36,9 @@ interface ParentWidget extends Widget {
 	ZUpdate: boolean;
 }
 
-interface StateWidget extends Widget {
-	state: Record<string, State<unknown>>;
-}
+// interface StateWidget extends Widget {
+//state: Record<string, State<unknown>>;
+//}
 
 // Event types
 interface Hovered {
