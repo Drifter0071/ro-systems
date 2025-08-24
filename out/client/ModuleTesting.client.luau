@@ -1,0 +1,15 @@
+-- Compiled with roblox-ts v3.0.0
+local TS = require(game:GetService("ReplicatedStorage"):WaitForChild("rbxts_include"):WaitForChild("RuntimeLib"))
+local PacketPlus = TS.import(script, game:GetService("ReplicatedStorage"), "Shared", "plugins", "PacketPlus").default
+local Iris = TS.import(script, script.Parent, "Iris")
+local packet = PacketPlus("PacketName", PacketPlus.NumberS8, PacketPlus.Vector3F32, PacketPlus.Instance)
+local iris = Iris.Init()
+packet.OnClientEvent.Connect(function(number, vector, instance)
+	iris:Connect(function()
+		iris.Window({ "Packet Data" })
+		iris.Text({ `Number: {number}` })
+		iris.Text({ `Vector: {vector}` })
+		iris.Text({ `Instance: {instance.Name}` })
+		iris:End()
+	end)
+end)
