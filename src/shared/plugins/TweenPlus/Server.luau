@@ -1,0 +1,458 @@
+-- Services.
+local CollectionService = game:GetService("CollectionService")
+local ServerStorage = game:GetService("ServerStorage")
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+
+-- Ready players table.
+local players = CollectionService:GetTagged("PlayerList")[1]
+if not players then error("Could not find a player-list module.") end
+players = require(players)
+
+-- Directories.
+local root = script.Parent
+local data = root.Data
+local utilities = root.Utilities
+
+-- Easing functions.
+local easingFunctions = require(utilities.EasingFunctions)
+
+-- Updation functions.
+local getUpdateFunctions = require(utilities.UpdateFunctions)
+
+-- Signal library.
+local Signal = CollectionService:GetTagged("Signal")[1]
+if not Signal then error("Could not find a signal module.") end
+Signal = require(Signal)
+if type(Signal) == "table" and Signal.new then Signal = Signal.new end
+
+-- Option defaults.
+local defaults = require(data.Defaults)
+
+-- Shared types.
+local types = require(data.Types)
+
+-- Signal type.
+type Signal = types.Signal
+
+-- Internal tween type.
+type InternalTween = types.InternalTween & {
+	Identifier: number,
+	
+	PlayerConnection: Signal,
+	DestroyConnection: Signal,
+	
+	Updated: Signal<number>,
+	Started: Signal,
+	Stopped: Signal,
+	Completed: Signal,
+}
+
+-- Network packets.
+local packets = CollectionService:GetTagged("Packets")[1]
+if not packets then error("Could not find packets module.") end
+packets = require(packets)
+
+-- Roblox API map.
+local apiMap = CollectionService:GetTagged("APIMap")[1]
+if not apiMap then error("Could not find APIMap module.") end
+apiMap = require(apiMap)
+
+-- Quick access to packets.
+local loadedPacket = packets.Loaded
+local createTweenPacket = packets.CreateTween
+local startTweenPacket = packets.StartTween
+local stopTweenPacket = packets.StopTween
+local resetTweenPacket = packets.ResetTween
+local destroyTweenPacket = packets.DestroyTween
+
+-- Store all possible tween identifiers.
+local identifiers = {}
+for identifier = 0, 255, 1 do
+	identifiers[identifier] = true
+end
+
+-- Active tweens collection.
+local tweens: {InternalTween} = table.create(256)
+
+-- Tween functions.
+local function stop(tween: InternalTween)
+	-- Verify playback state.
+	if not tween.Playing then return end
+	
+	-- Set playing boolean.
+	tween.Playing = nil
+	
+	-- Update instance values.
+	local alpha = tween.Ease(tween.Alpha)
+	for _, update in tween.UpdateFunctions do update(alpha) end
+	
+	-- Tween removal.
+	local lastIndex = #tweens
+	local index = tween.Index
+	if index == lastIndex then
+		tweens[lastIndex] = nil
+	else
+		local last = tweens[lastIndex]
+		last.Index = index
+		tweens[index] = last
+		tweens[lastIndex] = nil
+	end
+	
+	-- Set time markers.
+	tween.StopTime = os.clock()
+	
+	-- Fire stopped signal.
+	tween.Stopped:Fire()
+end
+local function destroy(tween: InternalTween)
+	-- Disconnect new player connection.
+	local playerConnection = tween.PlayerConnection
+	if playerConnection then playerConnection:Disconnect() end
+	-- Disconnect destroy connection.
+	tween.DestroyConnection:Disconnect()
+	
+	-- Free up identifier.
+	identifiers[tween.Identifier] = true
+	
+	-- Ensure no playback.
+	if not tween.StopTime then
+		-- Update instance values.
+		local alpha = tween.Ease(tween.Alpha)
+		for _, update in tween.UpdateFunctions do
+			update(alpha)
+		end
+		
+		-- Tween removal.
+		local lastIndex = #tweens
+		local index = tween.Index
+		if index == lastIndex then
+			tweens[lastIndex] = nil
+		else
+			local last = tweens[lastIndex]
+			last.Index = index
+			tweens[index] = last
+			tweens[lastIndex] = nil
+		end
+		
+		-- Fire stopped signal.
+		tween.Stopped:Fire()
+	end
+	
+	-- Destroy signals.
+	tween.Updated:Destroy()
+	tween.Started:Destroy()
+	tween.Stopped:Destroy()
+	tween.Completed:Destroy()
+	-- Clear tween data.
+	table.clear(tween)
+	-- Unlink methods.
+	setmetatable(tween, nil)
+end
+
+-- Setup tween processing.
+RunService.PostSimulation:Connect(function()
+	if #tweens == 0 then return end
+	
+	local currentTime = os.clock()
+	for _, tween in tweens do
+		-- Ensure desired interval (specified in FPS).
+		if tween.Interval then
+			if currentTime - tween.LastUpdate < tween.Interval then continue end
+			tween.LastUpdate = currentTime
+		end
+		
+		-- Account for wait.
+		if tween.WaitTime then
+			if currentTime - tween.WaitTime < tween.DelayTime then continue end
+			tween.WaitTime = nil
+			tween.StartTime = currentTime
+		end
+		
+		-- Calculate alpha.
+		local alpha = (currentTime - tween.StartTime)*tween.InverseTweenTime
+		
+		local phaseCompleted = alpha >= 1
+		
+		if phaseCompleted then
+			if tween.Reverse then alpha = 0 else alpha = 1 end
+		else
+			if tween.Reverse then alpha = 1 - alpha end
+		end
+		
+		-- Save alpha.
+		tween.Alpha = alpha
+		
+		-- Fire updated signal with raw alpha.
+		tween.Updated:Fire(alpha)
+		
+		-- Phase completion stuff.
+		if phaseCompleted then
+			if tween.Reverse then -- Already going in reverse. Means reversing is enabled, so no need to check for that.
+				tween.Repetitions += 1
+				if tween.RepeatCount == -1 or tween.Repetitions < tween.RepeatCount then
+					if tween.DelayTime then tween.WaitTime = currentTime end
+					tween.StartTime = currentTime
+					tween.Reverse = nil
+				else
+					if not tween.StopTime then
+						stop(tween)
+						tween.Stopped:Fire()
+						tween.Completed:Fire()
+					end
+				end
+			else -- Not going in reverse.
+				tween.Repetitions += 1
+				if tween.Reverses then
+					-- Reversing enabled.
+					if tween.DelayTime then tween.WaitTime = currentTime end
+					tween.Reverse = true
+					tween.StartTime = currentTime
+				else
+					-- Reversing disabled.
+					if tween.RepeatCount == -1 or tween.Repetitions < tween.RepeatCount then
+						if tween.DelayTime then tween.WaitTime = currentTime end
+						tween.StartTime = currentTime
+					else
+						if not tween.StopTime then
+							stop(tween)
+							tween.Stopped:Fire()
+							tween.Completed:Fire()
+						end
+					end
+				end
+			end
+		end
+	end
+end)
+
+-- Tween class.
+local Tween = {}
+Tween.__index = Tween
+
+Tween.Start = function(tween: InternalTween)
+	-- Verify playback state.
+	if tween.Playing then return end
+	
+	-- Set playing boolean.
+	tween.Playing = true
+	
+	-- Verify playback.
+	if not tween.StopTime then return end
+	
+	-- Handle conflicts.
+	local instance = tween.Instance
+	local values = tween.Values
+	
+	for _, otherTween in tweens do
+		if otherTween.Instance ~= instance then continue end
+		
+		for value in otherTween.Values do
+			if values[value] then
+				stop(otherTween)
+				tweens[otherTween] = nil
+				break
+			end
+		end
+	end
+	
+	-- Set time markers.
+	local stopDuration = os.clock() - tween.StopTime
+	tween.StartTime += stopDuration
+	if tween.Interval then tween.LastUpdate = -math.huge end
+	if tween.WaitTime then tween.WaitTime += stopDuration end
+	tween.StopTime = nil
+	
+	-- Notify clients.
+	for _, player in players do
+		startTweenPacket:FireClient(player, tween.Identifier)
+	end
+	
+	-- Add tween.
+	table.insert(tweens, tween)
+	tween.Index = #tweens
+	
+	-- Fire started signal.
+	tween.Started:Fire()
+end
+Tween.Stop = function(tween: InternalTween)
+	if tween.StopTime then return end
+	
+	for _, player in players do
+		stopTweenPacket:FireClient(player, tween.Identifier)
+	end
+	
+	stop(tween)
+end
+Tween.Reset = function(tween: InternalTween)
+	for _, player in players do
+		resetTweenPacket:FireClient(player, tween.Identifier)
+	end
+	
+	if not tween.StopTime then stop(tween) end
+	tween.WaitTime = nil
+	tween.StopTime = 0
+	tween.StartTime = 0
+	tween.Repetitions = 0
+	tween.Reverse = nil
+	for _, reset in tween.ResetFunctions do reset() end
+end
+Tween.Destroy = function(tween: InternalTween)
+	for _, player in players do
+		destroyTweenPacket:FireClient(player, tween.Identifier)
+	end
+	
+	destroy(tween)
+end
+
+-- Tween creation.
+return function(instance, values, options)
+	-- Argument errors.
+	if typeof(instance) ~= "Instance" then error("No instance provided.", 2) end
+	if type(values) ~= "table" or not next(values) then error("No values provided.", 2) end
+	
+	-- Get and verify identifier.
+	local identifier = next(identifiers)
+	if not identifier then error("Maximum server tweens (256) exceeded. Destroy tweens to free up space.", 2) end
+	
+	-- Handle values.
+	local updateFunctions, resetFunctions = getUpdateFunctions(apiMap, instance, values)
+	
+	-- Handle options.
+	if type(options) ~= "table" then options = {} end
+	
+	local optionsForClients = {}
+	
+	local tweenTime = options.Time
+	if type(tweenTime) ~= "number" then
+		tweenTime = defaults.InverseTime
+	else
+		if tweenTime <= 0 then
+			tweenTime = 0
+		else
+			tweenTime = 1/tweenTime
+		end
+		if tweenTime ~= defaults.Time then optionsForClients[1] = tweenTime end
+	end
+	
+	local ease = nil
+	do
+		local easingStyle = options.EasingStyle
+		local easing = easingFunctions[easingStyle]
+		if not easing then
+			easingStyle = "Linear"
+			easing = easingFunctions.Linear
+		end
+		if easingStyle == "Linear" then
+			ease = easing
+		else
+			local easingDirection = options.EasingDirection
+			ease = easing[easingDirection]
+			if not ease then
+				easingDirection = defaults.EasingDirection
+				ease = easing[easingDirection]
+			end
+			
+			optionsForClients[2] = easingStyle
+			optionsForClients[3] = easingDirection
+		end
+	end
+	
+	
+	local delayTime = options.DelayTime
+	if type(delayTime) ~= "number" or delayTime <= 0 then
+		delayTime = defaults.DelayTime
+	end
+	if delayTime ~= defaults.DelayTime then optionsForClients[4] = delayTime end
+	
+	local reverses = options.Reverses
+	if reverses == false then
+		reverses = nil
+		if defaults.Reverses then optionsForClients[4] = false end
+	elseif reverses == true then
+		if not defaults.Reverses then optionsForClients[4] = true end
+	else
+		reverses = defaults.Reverses
+	end
+	
+	local repeatCount = options.RepeatCount
+	if type(repeatCount) ~= "number" then
+		repeatCount = defaults.RepeatCount
+	else
+		if repeatCount < 0 then repeatCount = -1 end
+		if repeatCount ~= defaults.RepeatCount then optionsForClients[6] = repeatCount end
+	end
+	
+	local interval = options.FPS
+	if type(interval) == "number" then
+		interval = 1/interval
+		if interval ~= defaults.Interval then optionsForClients[7] = interval end
+	else
+		interval = defaults.Interval
+	end
+	
+	-- Notify all clients.
+	local replicate = options.Replicate
+	if replicate ~= false then 
+		for _, player in players do
+			createTweenPacket:FireClient(player, identifier, instance, values, optionsForClients)
+		end
+	end
+	
+	-- Create tween.
+	local tween = nil
+	tween = setmetatable({
+		-- Handle instance destroy.
+		DestroyConnection = instance.Destroying:Connect(function()
+			destroy(tween)
+		end),
+		
+		-- New player handling.
+		PlayerConnection = if replicate ~= false then loadedPacket.OnServerEvent:Connect(function(player)
+			createTweenPacket:FireClient(player, identifier, instance, values, optionsForClients)
+			if not tween.StopTime then
+				startTweenPacket:FireClient(player, identifier, os.clock() - tween.StartTime, tween.Repetitions)
+			end
+		end) else nil,
+		
+		-- Identifier.
+		Identifier = identifier,
+		
+		-- Signals.
+		Updated = Signal(),
+		Started = Signal(),
+		Stopped = Signal(),
+		Completed = Signal(),
+		
+		-- Main arguments.
+		Instance = instance,
+		Values = values,
+		
+		-- Value functions.
+		UpdateFunctions = updateFunctions,
+		ResetFunctions = resetFunctions,
+		
+		-- Options.
+		InverseTweenTime = tweenTime,
+		Ease = ease,
+		DelayTime = delayTime,
+		Reverses = reverses,
+		RepeatCount = repeatCount,
+		Interval = interval,
+		
+		-- Time markers.
+		StartTime = 0,
+		StopTime = 0,
+		
+		-- Trackers.
+		Repetitions = 0
+	}, Tween)
+	
+	-- Handle instance destroy.
+	instance.Destroying:Connect(function()
+		destroy(tween)
+	end)
+	
+	-- Return tween.
+	return tween
+end
